@@ -279,7 +279,7 @@ def get_claude_reply(user_id: str, user_text: str) -> tuple[str, QuickReply | No
 # Webhook エンドポイント
 # ===================================================
 
-@app.route("/callback", methods=["POST"])
+@app.route("/webhook", methods=["POST"])
 def callback():
     signature = request.headers["X-Line-Signature"]
     body = request.get_data(as_text=True)
