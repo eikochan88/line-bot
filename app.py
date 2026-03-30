@@ -13,7 +13,7 @@ from linebot.v3.messaging import (
     MessageAction,
 )
 from linebot.v3.webhooks import MessageEvent, TextMessageContent
-import anthropic
+from openai import OpenAI
 
 app = Flask(__name__)
 
@@ -21,7 +21,7 @@ line_configuration = Configuration(
     access_token=os.environ.get("LINE_CHANNEL_ACCESS_TOKEN")
 )
 handler = WebhookHandler(os.environ.get("LINE_CHANNEL_SECRET"))
-claude_client = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
+openai_client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
 
 
 # ===================================================
@@ -221,14 +221,16 @@ def generate_proposal(user_id: str, answers: dict) -> str:
 """
 
     try:
-        response = claude_client.messages.create(
-            model="claude-opus-4-6",
+        response = openai_client.chat.completions.create(
+            model="gpt-4o-mini",
             max_tokens=600,
-            system=SYSTEM_PROMPT,
-            messages=[{"role": "user", "content": prompt}],
+            messages=[
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": prompt},
+            ],
         )
-        proposal_text = response.content[0].text
-    except anthropic.APIError:
+        proposal_text = response.choices[0].message.content
+    except Exception:
         proposal_text = (
             "ヒアリングありがとうございました！\n"
             "現在、提案の生成に失敗しました。\n"
@@ -241,7 +243,7 @@ def generate_proposal(user_id: str, answers: dict) -> str:
 
 
 # ===================================================
-# 通常会話（Claude API）
+# 通常会話（OpenAI API）
 # ===================================================
 
 def get_claude_reply(user_id: str, user_text: str) -> tuple[str, QuickReply | None]:
@@ -249,13 +251,12 @@ def get_claude_reply(user_id: str, user_text: str) -> tuple[str, QuickReply | No
     history.append({"role": "user", "content": user_text})
 
     try:
-        response = claude_client.messages.create(
-            model="claude-opus-4-6",
+        response = openai_client.chat.completions.create(
+            model="gpt-4o-mini",
             max_tokens=512,
-            system=SYSTEM_PROMPT,
-            messages=history,
+            messages=[{"role": "system", "content": SYSTEM_PROMPT}] + history,
         )
-        reply_text = response.content[0].text
+        reply_text = response.choices[0].message.content
         history.append({"role": "assistant", "content": reply_text})
 
         # 古い履歴を削除
@@ -263,11 +264,11 @@ def get_claude_reply(user_id: str, user_text: str) -> tuple[str, QuickReply | No
         if len(history) > max_messages:
             conversation_histories[user_id] = history[-max_messages:]
 
-    except anthropic.APIError as e:
+    except Exception as e:
         reply_text = (
             "申し訳ありません、エラーが発生しました🙏\n"
             "しばらく経ってから再度お試しください。\n"
-            f"（エラーコード: {e.status_code}）"
+            f"（エラー: {e}）"
         )
 
     contact_keywords = ["問い合わせ", "連絡先", "電話", "メール", "contact"]
