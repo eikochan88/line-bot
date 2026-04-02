@@ -60,6 +60,8 @@ approval_queue: dict[str, str] = {}
 conv_hist: dict[str, list] = {}
 # 決済待ちキュー: {stripe_session_id or uid: customer_uid}
 payment_pending: dict[str, str] = {}
+# ヒアリング回答の保存（セッションリセット後も保持）: {uid: answers}
+survey_answers: dict[str, dict] = {}
 
 
 def sess(uid: str) -> dict:
@@ -166,38 +168,37 @@ SURVEY_KEYS = ["s_industry", "s_current", "s_expectation", "s_concern"]
 # ════════════════════════════════════════════════════════════════════
 
 def gen_oyama_survey_plan(answers: dict) -> str:
-    """大山社長がヒアリング結果から提案書を生成"""
-    p = f"""ヒアリング結果から詳細なAI導入提案書を作成してください。
+    """大山社長がヒアリング結果から提案書を自然な会話文で生成"""
+    p = f"""あなたはAiden株式会社の大山光（代表取締役社長）です。
+お客様のヒアリング結果を受けて、LINEで自然な言葉で提案メッセージを送ってください。
 
-【選択サービス】{answers.get('s_service_name')}
-【業種】{answers.get('s_industry')}
-【現在の業務方法】{answers.get('s_current')}
-【期待する成果】{answers.get('s_expectation')}
-【心配な点】{answers.get('s_concern')}
-【料金目安】{answers.get('s_pricing')}
+【お客様情報】
+- ご希望サービス：{answers.get('s_service_name')}
+- 業種：{answers.get('s_industry')}
+- 現在の対応方法：{answers.get('s_current')}
+- 期待する成果：{answers.get('s_expectation')}
+- ご不安な点：{answers.get('s_concern')}
+- 料金目安：{answers.get('s_pricing')}
 
-LINE向け・350文字以内・絵文字適度に。構成：
-①このサービスで解決できること（具体的に2〜3点）
-②導入後の期待効果
-③料金・納期の目安
-最後に「ご質問はお気軽に！」と書く。"""
-    return "✨ 大山社長からのご提案 ✨\n" + "━"*18 + "\n" + ai("oyama", p, 700)
+自然な会話口調で300〜350文字。絵文字を適度に使って読みやすく。
+内容：①このサービスで何が解決できるか ②導入後の効果 ③料金と納期の目安。
+最後は「ご不明な点はお気軽にどうぞ😊」で締める。
+ヘッダーや罫線は不要。そのまま送れる自然なメッセージにしてください。"""
+    return ai("oyama", p, 700)
 
 
 def gen_payment_request(answers: dict, checkout_url: str) -> str:
-    """中井誠が決済リンクを案内"""
-    p = f"""お客様への決済リンクのご案内文を作成してください。
+    """中井誠が決済リンクを自然な会話文で案内"""
+    p = f"""あなたはAiden株式会社の中井誠（経理部長）です。
+お客様にお支払い方法をLINEで自然に案内してください。
 
-サービス：{answers.get('s_service_name')}
-料金目安：{answers.get('s_pricing')}
-決済リンク：{checkout_url}
+- サービス：{answers.get('s_service_name')}
+- 料金目安：{answers.get('s_pricing')}
 
-LINE向け・150文字以内・丁寧に。最後に「お支払い完了後、制作を開始いたします🚀」と書く。"""
-    return (
-        f"💳 中井誠（経理部長）よりお支払いのご案内\n{'━'*18}\n"
-        + ai("nakai", p, 400)
-        + f"\n\n👉 {checkout_url}"
-    )
+自然な会話口調で100文字以内。丁寧かつ親しみやすく。
+最後は「お支払い完了後、すぐに制作を開始いたします🚀」で締める。
+ヘッダーや罫線は不要。そのまま送れる自然なメッセージにしてください。"""
+    return ai("nakai", p, 300) + f"\n\n👉 {checkout_url}"
 
 
 def create_checkout_url(answers: dict, customer_uid: str) -> str:
@@ -232,21 +233,36 @@ def create_checkout_url(answers: dict, customer_uid: str) -> str:
 
 
 def send_production_start(customer_uid: str):
-    """決済完了後：上田恵が制作開始通知を送付"""
-    answers = sessions.get(customer_uid, {}).get("answers", {})
+    """決済完了後：上田恵が制作開始通知を自然な会話文で送付"""
+    # セッションリセット後も答えが参照できるようsurvey_answersから取得
+    answers = survey_answers.get(customer_uid, {})
     service = answers.get("s_service_name", "AIサービス")
+    industry = answers.get("s_industry", "")
+
     msg = ai("ueda",
-        f"決済完了のお客様へ制作開始のご連絡をお送りください。\n"
-        f"サービス：{service}\n"
-        f"LINE向け・150文字以内・丁寧に・今後のスケジュールも案内。", 350)
-    _push_line(customer_uid,
-        f"🎬 上田恵（CSマネージャー）より\n{'━'*18}\n{msg}")
+        f"""あなたはAiden株式会社の上田恵（カスタマーサポート部長）です。
+お客様のお支払いが完了しました。制作開始のご連絡をLINEで自然に送ってください。
+
+- サービス：{service}
+- 業種：{industry}
+
+自然な会話口調で150文字以内。丁寧で温かみのある文体。
+今後のスケジュール（1〜2週間で進捗報告など）も一言添える。
+ヘッダーや罫線は不要。そのまま送れる自然なメッセージにしてください。""", 400)
+
+    _push_line(customer_uid, msg)
+
     if EIKO_UID:
-        _push_line(EIKO_UID,
-            f"💳 決済完了通知\n{'━'*18}\n"
-            f"【サービス】{service}\n"
-            f"顧客UID：{customer_uid}\n"
-            f"制作開始の連絡を送付しました✅")
+        eiko_msg = ai("ishida",
+            f"""あなたはAiden株式会社の石田圭（専務取締役）です。
+栄子会長に決済完了の報告をLINEで簡潔に送ってください。
+
+- サービス：{service}
+- 業種：{industry}
+- 顧客UID：{customer_uid}
+
+100文字以内・簡潔に。ヘッダーや罫線は不要。""", 200)
+        _push_line(EIKO_UID, eiko_msg)
 
 # ════════════════════════════════════════════════════════════════════
 # 2. 提案書生成（大山社長）
@@ -828,28 +844,33 @@ def handle_message(event):
                     captured_answers = dict(s["answers"])
                     captured_uid = uid
 
-                    # ① 大山社長が提案書を生成・送付
+                    # 回答をsurvey_answersに保存（セッションリセット後も参照できるよう）
+                    survey_answers[captured_uid] = captured_answers
+
+                    # ① 大山社長が提案書を自然な文章で生成・送付
                     plan = gen_oyama_survey_plan(captured_answers)
                     _push_line(captured_uid, plan)
 
-                    # ② 中井誠が決済リンクを生成・送付
+                    # ② 中井誠が決済リンクを自然な文章で生成・送付
                     checkout_url = create_checkout_url(captured_answers, captured_uid)
                     payment_msg  = gen_payment_request(captured_answers, checkout_url)
                     _push_line(captured_uid, payment_msg)
 
-                    # ③ 栄子さんに通知
+                    # ③ 栄子さんにヒアリング完了通知
                     if EIKO_UID:
-                        _push_line(EIKO_UID,
-                            f"📋 ヒアリングシート完了通知\n{'━'*18}\n"
-                            f"【サービス】{captured_answers.get('s_service_name')}\n"
-                            f"【業種】{captured_answers.get('s_industry')}\n"
-                            f"【現在の方法】{captured_answers.get('s_current')}\n"
-                            f"【期待成果】{captured_answers.get('s_expectation')}\n"
-                            f"【心配事】{captured_answers.get('s_concern')}\n"
-                            f"{'━'*18}\n"
-                            f"提案書・決済リンクを送付済みです✅\n"
-                            f"決済完了後、上田恵から制作開始通知が送られます。"
-                        )
+                        notify = ai("ishida",
+                            f"""あなたはAiden株式会社の石田圭（専務取締役）です。
+栄子会長にヒアリング完了の報告をLINEで送ってください。
+
+- サービス：{captured_answers.get('s_service_name')}
+- 業種：{captured_answers.get('s_industry')}
+- 現在の方法：{captured_answers.get('s_current')}
+- 期待成果：{captured_answers.get('s_expectation')}
+- ご不安：{captured_answers.get('s_concern')}
+
+150文字以内・簡潔に。提案書と決済リンクを送付済みであることも伝える。
+ヘッダーや罫線は不要。""", 250)
+                        _push_line(EIKO_UID, notify)
 
                     # セッションをIDLEに戻す（payment_pendingで決済追跡）
                     reset(captured_uid)
