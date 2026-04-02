@@ -4,3 +4,4 @@ gunicorn==22.0.0
 openai
 anthropic
 requests
+stripe

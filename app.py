@@ -35,8 +35,10 @@ GITHUB_TOKEN      = os.environ.get("GITHUB_TOKEN", "")
 GITHUB_USER       = os.environ.get("GITHUB_USERNAME", "eikochan88")
 RENDER_API_KEY    = os.environ.get("RENDER_API_KEY", "")
 RENDER_OWNER_ID   = os.environ.get("RENDER_OWNER_ID", "")
-EIKO_UID          = os.environ.get("EIKO_LINE_USER_ID", "")
-PAYMENT_LINK      = os.environ.get("PAYMENT_LINK", "https://aiden.co.jp/payment")
+EIKO_UID              = os.environ.get("EIKO_LINE_USER_ID", "")
+PAYMENT_LINK          = os.environ.get("PAYMENT_LINK", "https://aiden.co.jp/payment")
+STRIPE_SECRET_KEY     = os.environ.get("STRIPE_SECRET_KEY", "")
+STRIPE_WEBHOOK_SECRET = os.environ.get("STRIPE_WEBHOOK_SECRET", "")
 
 # ════════════════════════════════════════════════════════════════════
 # ステート定義
@@ -56,6 +58,8 @@ sessions: dict[str, dict] = {}
 approval_queue: dict[str, str] = {}
 # 通常会話履歴
 conv_hist: dict[str, list] = {}
+# 決済待ちキュー: {stripe_session_id or uid: customer_uid}
+payment_pending: dict[str, str] = {}
 
 
 def sess(uid: str) -> dict:
@@ -158,27 +162,91 @@ SURVEY_Q = [
 SURVEY_KEYS = ["s_industry", "s_current", "s_expectation", "s_concern"]
 
 # ════════════════════════════════════════════════════════════════════
-# AI導入ヒアリングシート：提案生成（木村忠史）
+# AI導入ヒアリングシート：提案生成（大山社長）・決済案内（中井誠）・制作開始通知（上田恵）
 # ════════════════════════════════════════════════════════════════════
 
-def gen_survey_proposal(answers: dict) -> str:
-    service  = answers.get("s_service_name", "AIサービス")
-    pricing  = answers.get("s_pricing", "")
-    p = f"""お客様のヒアリング結果から、AI導入の提案を作成してください。
+def gen_oyama_survey_plan(answers: dict) -> str:
+    """大山社長がヒアリング結果から提案書を生成"""
+    p = f"""ヒアリング結果から詳細なAI導入提案書を作成してください。
 
-【選択サービス】{service}
+【選択サービス】{answers.get('s_service_name')}
 【業種】{answers.get('s_industry')}
 【現在の業務方法】{answers.get('s_current')}
 【期待する成果】{answers.get('s_expectation')}
 【心配な点】{answers.get('s_concern')}
-【料金目安】{pricing}
+【料金目安】{answers.get('s_pricing')}
 
-LINE向け・300文字以内・絵文字適度に。以下の構成で：
-①選択サービスの概要（1〜2文）
-②お客様の課題への具体的な解決策（2〜3点）
-③期待できる効果
-④「ご興味があれば下記の決済リンクからお申込みいただけます！」で締める。"""
-    return "✨ 木村忠史からのご提案 ✨\n" + "━"*18 + "\n" + ai("kimura", p, 700)
+LINE向け・350文字以内・絵文字適度に。構成：
+①このサービスで解決できること（具体的に2〜3点）
+②導入後の期待効果
+③料金・納期の目安
+最後に「ご質問はお気軽に！」と書く。"""
+    return "✨ 大山社長からのご提案 ✨\n" + "━"*18 + "\n" + ai("oyama", p, 700)
+
+
+def gen_payment_request(answers: dict, checkout_url: str) -> str:
+    """中井誠が決済リンクを案内"""
+    p = f"""お客様への決済リンクのご案内文を作成してください。
+
+サービス：{answers.get('s_service_name')}
+料金目安：{answers.get('s_pricing')}
+決済リンク：{checkout_url}
+
+LINE向け・150文字以内・丁寧に。最後に「お支払い完了後、制作を開始いたします🚀」と書く。"""
+    return (
+        f"💳 中井誠（経理部長）よりお支払いのご案内\n{'━'*18}\n"
+        + ai("nakai", p, 400)
+        + f"\n\n👉 {checkout_url}"
+    )
+
+
+def create_checkout_url(answers: dict, customer_uid: str) -> str:
+    """Stripe動的チェックアウトセッションを生成。キー未設定なら静的リンクを返す。"""
+    if not STRIPE_SECRET_KEY:
+        payment_pending[customer_uid] = customer_uid
+        return PAYMENT_LINK
+    try:
+        import stripe as _stripe
+        _stripe.api_key = STRIPE_SECRET_KEY
+        session = _stripe.checkout.Session.create(
+            payment_method_types=["card"],
+            line_items=[{
+                "price_data": {
+                    "currency": "jpy",
+                    "product_data": {"name": answers.get("s_service_name", "AIサービス")},
+                    "unit_amount": 200000,
+                },
+                "quantity": 1,
+            }],
+            mode="payment",
+            success_url="https://aiden.co.jp/success",
+            cancel_url="https://aiden.co.jp/cancel",
+            metadata={"line_uid": customer_uid},
+        )
+        payment_pending[session.id] = customer_uid
+        return session.url
+    except Exception as e:
+        print(f"Stripe session error: {e}")
+        payment_pending[customer_uid] = customer_uid
+        return PAYMENT_LINK
+
+
+def send_production_start(customer_uid: str):
+    """決済完了後：上田恵が制作開始通知を送付"""
+    answers = sessions.get(customer_uid, {}).get("answers", {})
+    service = answers.get("s_service_name", "AIサービス")
+    msg = ai("ueda",
+        f"決済完了のお客様へ制作開始のご連絡をお送りください。\n"
+        f"サービス：{service}\n"
+        f"LINE向け・150文字以内・丁寧に・今後のスケジュールも案内。", 350)
+    _push_line(customer_uid,
+        f"🎬 上田恵（CSマネージャー）より\n{'━'*18}\n{msg}")
+    if EIKO_UID:
+        _push_line(EIKO_UID,
+            f"💳 決済完了通知\n{'━'*18}\n"
+            f"【サービス】{service}\n"
+            f"顧客UID：{customer_uid}\n"
+            f"制作開始の連絡を送付しました✅")
 
 # ════════════════════════════════════════════════════════════════════
 # 2. 提案書生成（大山社長）
@@ -760,27 +828,16 @@ def handle_message(event):
                     captured_answers = dict(s["answers"])
                     captured_uid = uid
 
-                    # 提案書送付
-                    proposal = gen_survey_proposal(captured_answers)
-                    _push_line(captured_uid, proposal)
+                    # ① 大山社長が提案書を生成・送付
+                    plan = gen_oyama_survey_plan(captured_answers)
+                    _push_line(captured_uid, plan)
 
-                    # 料金・納期送付
-                    _push_line(captured_uid,
-                        f"💰 料金・納期の目安\n{'━'*18}\n"
-                        f"【{captured_answers.get('s_service_name', '')}】\n"
-                        f"{captured_answers.get('s_pricing', '')}\n\n"
-                        f"※正式なお見積もりはお申込み後にご提出します。"
-                    )
+                    # ② 中井誠が決済リンクを生成・送付
+                    checkout_url = create_checkout_url(captured_answers, captured_uid)
+                    payment_msg  = gen_payment_request(captured_answers, checkout_url)
+                    _push_line(captured_uid, payment_msg)
 
-                    # 決済リンク送付
-                    _push_line(captured_uid,
-                        f"📲 お申込み・お支払いはこちら\n{'━'*18}\n"
-                        f"{PAYMENT_LINK}\n\n"
-                        f"ご不明な点はお気軽にどうぞ😊\n"
-                        f"📧 info@aiden.co.jp"
-                    )
-
-                    # 栄子さんに通知
+                    # ③ 栄子さんに通知
                     if EIKO_UID:
                         _push_line(EIKO_UID,
                             f"📋 ヒアリングシート完了通知\n{'━'*18}\n"
@@ -790,10 +847,11 @@ def handle_message(event):
                             f"【期待成果】{captured_answers.get('s_expectation')}\n"
                             f"【心配事】{captured_answers.get('s_concern')}\n"
                             f"{'━'*18}\n"
-                            f"提案書・料金・決済リンクを送付済みです✅"
+                            f"提案書・決済リンクを送付済みです✅\n"
+                            f"決済完了後、上田恵から制作開始通知が送られます。"
                         )
 
-                    # セッションをIDLEに戻す
+                    # セッションをIDLEに戻す（payment_pendingで決済追跡）
                     reset(captured_uid)
 
                 threading.Thread(target=_gen_survey, daemon=True).start()
@@ -905,6 +963,55 @@ def handle_message(event):
                 f"📧 info@aiden.co.jp", QR_DONE()
             )])
 
+
+# ════════════════════════════════════════════════════════════════════
+# Stripe Webhook（決済完了 → 上田恵が制作開始通知）
+# ════════════════════════════════════════════════════════════════════
+
+@app.route("/stripe/webhook", methods=["POST"])
+def stripe_webhook():
+    payload    = request.get_data()
+    sig_header = request.headers.get("Stripe-Signature", "")
+
+    # 署名検証
+    if STRIPE_WEBHOOK_SECRET and sig_header:
+        try:
+            import stripe as _stripe
+            event = _stripe.Webhook.construct_event(
+                payload, sig_header, STRIPE_WEBHOOK_SECRET
+            )
+        except Exception as e:
+            print(f"Stripe webhook error: {e}")
+            abort(400)
+    else:
+        try:
+            event = json.loads(payload)
+        except Exception:
+            abort(400)
+
+    event_type = event.get("type", "")
+    if event_type in ("checkout.session.completed", "payment_intent.succeeded"):
+        obj          = event["data"]["object"]
+        metadata     = obj.get("metadata", {})
+        session_id   = obj.get("id", "")
+
+        # メタデータのline_uid → 動的チェックアウト
+        customer_uid = metadata.get("line_uid")
+        # なければpayment_pendingキューから取得（静的リンク用）
+        if not customer_uid:
+            customer_uid = payment_pending.pop(session_id, None)
+        if not customer_uid:
+            # 静的リンク用フォールバック：キューの先頭
+            if payment_pending:
+                customer_uid = next(iter(payment_pending.values()))
+                payment_pending.pop(next(iter(payment_pending)), None)
+
+        if customer_uid:
+            threading.Thread(
+                target=send_production_start, args=(customer_uid,), daemon=True
+            ).start()
+
+    return "OK", 200
 
 # ════════════════════════════════════════════════════════════════════
 # 起動
